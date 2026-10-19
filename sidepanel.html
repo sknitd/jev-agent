@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jev Agent</title>
+  <link rel="stylesheet" href="ui.css" />
+  <style>
+    body { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line);
+    }
+    .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; font-size: 14px; }
+    .brand img { width: 18px; height: 18px; }
+    .status { font-size: 12px; color: var(--muted); font-weight: 450; }
+    .status.live { color: var(--signal); }
+
+    main { overflow-y: auto; padding: 14px; }
+    .empty { color: var(--muted); max-width: 32ch; margin: 24px auto; text-align: center; }
+    .empty p { margin: 0 0 12px; }
+    .setup { border: 1px solid var(--line); border-radius: var(--r-md); padding: 14px; margin-bottom: 14px; }
+    .setup p { margin: 0 0 10px; }
+
+    .goal {
+      background: var(--signal-soft); border-radius: var(--r-md); padding: 10px 12px;
+      margin: 0 0 14px; white-space: pre-wrap; word-break: break-word;
+    }
+    .step { position: relative; padding: 0 0 14px 22px; }
+    .step::before { content: ""; position: absolute; left: 6px; top: 20px; bottom: 0; width: 1px; background: var(--line); }
+    .step:last-of-type::before { display: none; }
+    .step-n {
+      position: absolute; left: 0; top: 1px; width: 13px; height: 13px; border-radius: 50%;
+      border: 1.5px solid var(--signal); background: var(--paper);
+    }
+    .step.finished .step-n { background: var(--signal); }
+    .step.failed .step-n { border-color: var(--err); background: var(--err); }
+    .step h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+    .line { margin: 3px 0; word-break: break-word; }
+    .muted { color: var(--muted); }
+    .thought { color: var(--muted); font-style: italic; }
+    .act { font-weight: 600; }
+    .act .verb {
+      display: inline-block; font-size: 11px; font-weight: 650; color: var(--signal);
+      border: 1px solid currentColor; border-radius: var(--r-sm); padding: 0 5px; margin-right: 6px;
+    }
+    .err { color: var(--err); }
+    .okc { color: var(--ok); }
+
+    .jev { margin: 6px 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-md); }
+    .jev-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+    .jev-head b { font-weight: 600; }
+    .alts { margin: 6px 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--muted); }
+    .alts li { display: flex; justify-content: space-between; gap: 8px; }
+    .alts li span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    details.shot summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+    details.shot img { width: 100%; margin-top: 6px; border: 1px solid var(--line); border-radius: var(--r-sm); }
+
+    .confirm { border: 1px solid var(--warn); background: var(--warn-soft); border-radius: var(--r-md); padding: 10px 12px; margin: 6px 0; }
+    .confirm p { margin: 0 0 8px; }
+    .confirm .row { display: flex; gap: 8px; }
+    .confirm .reply { width: 100%; margin: 0 0 8px; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 6px 8px; background: var(--paper); }
+
+    .result { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 4px; }
+    .result h3 { margin: 0 0 6px; font-size: 14px; }
+    .result p { margin: 0; white-space: pre-wrap; word-break: break-word; }
+
+    form { border-top: 1px solid var(--line); padding: 10px; display: grid; gap: 8px; }
+    textarea {
+      width: 100%; resize: vertical; min-height: 64px; max-height: 40vh;
+      border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px; background: var(--paper);
+    }
+    .row-end { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .hint { color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand"><img src="icons/icon48.png" alt="" /> Jev Agent <span id="status" class="status"></span></div>
+    <button id="settings" class="icon-btn" title="Settings" aria-label="Settings">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+  </header>
+
+  <main id="main">
+    <section id="setup" class="setup" hidden>
+      <p>Add your TypeSafe and DeepSeek API keys to start.</p>
+      <button id="openSettings" class="btn primary" type="button">Open settings</button>
+    </section>
+    <div id="empty" class="empty">
+      <p>Describe a task for the current tab. The agent works through it one step at a time and shows how sure Jev is about each element it picks.</p>
+    </div>
+    <div id="log" aria-live="polite"></div>
+  </main>
+
+  <form id="composer">
+    <textarea id="prompt" rows="3" placeholder="e.g. book ltt to sc 21oct 3ac 12219 rahul/31/m/lb/veg on irctc, username … password …, wait on payment page"></textarea>
+    <div class="row-end">
+      <span class="hint">Ctrl+Enter to run</span>
+      <div>
+        <button id="stop" class="btn danger" type="button" hidden>Stop</button>
+        <button id="run" class="btn primary" type="submit">Run task</button>
+      </div>
+    </div>
+  </form>
+  <script src="sidepanel.js" type="module"></script>
+</body>
+</html>

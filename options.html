@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jev Agent settings</title>
+  <link rel="stylesheet" href="ui.css" />
+  <style>
+    body { font-size: 14px; }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 32px 20px 96px; }
+    h1 { font-size: 22px; margin: 0 0 4px; display: flex; align-items: center; gap: 10px; }
+    h1 img { width: 26px; height: 26px; }
+    .lede { color: var(--muted); margin: 0 0 28px; max-width: 60ch; }
+    fieldset { border: 1px solid var(--line); border-radius: var(--r-md); padding: 18px 18px 14px; margin: 0 0 20px; }
+    legend { font-weight: 650; font-size: 15px; padding: 0 6px; }
+    .about { color: var(--muted); margin: 0 0 14px; max-width: 62ch; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+    .full { grid-column: 1 / -1; }
+    label.f { display: grid; gap: 4px; font-weight: 550; }
+    label.f small { font-weight: 400; color: var(--muted); }
+    input[type=text], input[type=password], input[type=number], input[type=url] {
+      width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--paper);
+    }
+    .key { display: flex; gap: 6px; }
+    .key input { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+    label.check { display: flex; gap: 8px; align-items: flex-start; font-weight: 450; }
+    label.check input { margin-top: 3px; }
+    label.check small { display: block; color: var(--muted); }
+    .test { display: flex; align-items: center; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+    .results { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; }
+    .results li { display: grid; grid-template-columns: 18px 64px 1fr; gap: 6px; align-items: baseline; word-break: break-word; }
+    .results .ok { color: var(--ok); }
+    .results .bad { color: var(--err); }
+    .results b { font-weight: 600; }
+    .bar {
+      position: fixed; left: 0; right: 0; bottom: 0; background: var(--paper); border-top: 1px solid var(--line);
+      padding: 10px 20px; display: flex; justify-content: center;
+    }
+    .bar .inner { width: 100%; max-width: 720px; display: flex; justify-content: flex-end; align-items: center; gap: 12px; }
+    #saved { color: var(--ok); }
+    @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1><img src="icons/icon48.png" alt="" /> Jev Agent settings</h1>
+    <p class="lede">Keys are stored only in this browser profile (chrome.storage.local) and are sent only to the API addresses below.</p>
+
+    <form id="form" autocomplete="off">
+      <fieldset>
+        <legend>TypeSafe Jev</legend>
+        <p class="about">Jev picks which element to act on from the page and its screenshot, rates whether an action is hard to undo, and checks that the task is finished.</p>
+        <div class="grid">
+          <label class="f full">API key
+            <span class="key"><input id="typesafeKey" type="password" spellcheck="false" placeholder="From console.typesafe.ai/keys" />
+            <button class="btn" type="button" data-reveal="typesafeKey">Show</button></span>
+          </label>
+          <label class="f">Model for choices and checks
+            <input id="jevModel" type="text" spellcheck="false" />
+            <small>jev-latest, jev-preview, or a pinned version like jev-1.14.0</small>
+          </label>
+          <label class="f">Model for on-screen location
+            <input id="boxModel" type="text" spellcheck="false" />
+            <small>Box questions need Jev 1.14: jev-preview or jev-1.14.0</small>
+          </label>
+          <label class="f full">API address
+            <input id="typesafeBase" type="url" spellcheck="false" />
+          </label>
+          <label class="check full"><input id="useBox" type="checkbox" />
+            <span>Locate on screen when unsure<small>If Jev isn't confident about the element list, ask a Box question on the screenshot instead.</small></span>
+          </label>
+        </div>
+        <div class="test">
+          <button class="btn" type="button" id="testTypeSafe">Test connection</button>
+          <span class="muted" id="tsHint">Checks text, images and, if on, on-screen location.</span>
+        </div>
+        <ul class="results" id="tsResults"></ul>
+      </fieldset>
+
+      <fieldset>
+        <legend>DeepSeek helper</legend>
+        <p class="about">DeepSeek reads the page and decides the next step. Jev then grounds that step to a real element.</p>
+        <div class="grid">
+          <label class="f full">API key
+            <span class="key"><input id="deepseekKey" type="password" spellcheck="false" placeholder="sk-…" />
+            <button class="btn" type="button" data-reveal="deepseekKey">Show</button></span>
+          </label>
+          <label class="f">Model
+            <input id="deepseekModel" type="text" spellcheck="false" />
+            <small>deepseek-flash is V4.1 Flash. deepseek-v4-flash also works for now.</small>
+          </label>
+          <label class="f">API address
+            <input id="deepseekBase" type="url" spellcheck="false" />
+            <small>Any OpenAI-compatible endpoint serving the model</small>
+          </label>
+          <label class="check full"><input id="deepseekVision" type="checkbox" />
+            <span>Send screenshots to DeepSeek<small>Helps on visual pages. Turn off if your model or endpoint doesn't accept images.</small></span>
+          </label>
+        </div>
+        <div class="test">
+          <button class="btn" type="button" id="testDeepSeek">Test connection</button>
+          <span class="muted">Sends one short request, plus an image if screenshots are on.</span>
+        </div>
+        <ul class="results" id="dsResults"></ul>
+      </fieldset>
+
+      <fieldset>
+        <legend>Agent</legend>
+        <div class="grid">
+          <label class="f">Step limit
+            <input id="maxSteps" type="number" min="1" max="100" step="1" />
+          </label>
+          <label class="f">Element confidence needed
+            <input id="choiceThreshold" type="number" min="0" max="1" step="0.05" />
+            <small>0 to 1. Below this, the agent tries on-screen location.</small>
+          </label>
+          <label class="f">On-screen confidence needed
+            <input id="boxThreshold" type="number" min="0" max="1" step="0.05" />
+          </label>
+          <label class="f">Ask before actions rated hard to undo above
+            <input id="riskThreshold" type="number" min="0" max="1" step="0.05" />
+          </label>
+          <label class="check full"><input id="confirmRisky" type="checkbox" />
+            <span>Ask before purchases, sending, deleting and similar<small>Jev rates every action; you approve the risky ones in the side panel.</small></span>
+          </label>
+          <label class="check full"><input id="setOfMark" type="checkbox" />
+            <span>Label elements on the screenshot<small>Briefly draws each element's id on the page while the screenshot for Jev is taken.</small></span>
+          </label>
+          <label class="check full"><input id="trustedInput" type="checkbox" />
+            <span>Use real mouse and keyboard input<small>Clicks and types through Chrome's debugger, so sites like MakeMyTrip respond. Chrome shows a "started debugging" bar while a task runs.</small></span>
+          </label>
+        </div>
+      </fieldset>
+    </form>
+  </div>
+
+  <div class="bar"><div class="inner">
+    <span id="saved" aria-live="polite"></span>
+    <button class="btn" type="button" id="reset">Restore defaults</button>
+    <button class="btn primary" type="submit" form="form">Save settings</button>
+  </div></div>
+
+  <script src="options.js" type="module"></script>
+</body>
+</html>
