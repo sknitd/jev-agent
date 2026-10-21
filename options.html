@@ -105,6 +105,30 @@
       </fieldset>
 
       <fieldset>
+        <legend>Cerebras (Qwen)</legend>
+        <p class="about">A fast alternative planner. Pick DeepSeek or Cerebras in the side panel before running a task.</p>
+        <div class="grid">
+          <label class="f full">API key
+            <span class="key"><input id="cerebrasKey" type="password" spellcheck="false" placeholder="csk-…" />
+            <button class="btn" type="button" data-reveal="cerebrasKey">Show</button></span>
+          </label>
+          <label class="f">Model
+            <input id="cerebrasModel" type="text" spellcheck="false" />
+            <small>qwen-3.8-27b by default</small>
+          </label>
+          <label class="f">API address
+            <input id="cerebrasBase" type="url" spellcheck="false" />
+            <small>https://api.cerebras.ai/v1</small>
+          </label>
+        </div>
+        <div class="test">
+          <button class="btn" type="button" id="testCerebras">Test connection</button>
+          <span class="muted">Sends one short request.</span>
+        </div>
+        <ul class="results" id="cbResults"></ul>
+      </fieldset>
+
+      <fieldset>
         <legend>Agent</legend>
         <div class="grid">
           <label class="f">Step limit

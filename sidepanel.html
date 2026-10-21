@@ -73,6 +73,8 @@
     }
     .row-end { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .hint { color: var(--muted); font-size: 12px; }
+    .planner { display: inline-flex; align-items: center; gap: 6px; }
+    .planner select { border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--paper); padding: 3px 6px; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -85,7 +87,7 @@
 
   <main id="main">
     <section id="setup" class="setup" hidden>
-      <p>Add your TypeSafe and DeepSeek API keys to start.</p>
+      <p>Add your TypeSafe key, and a key for the planner picked below (DeepSeek or Cerebras), to start.</p>
       <button id="openSettings" class="btn primary" type="button">Open settings</button>
     </section>
     <div id="empty" class="empty">
@@ -97,7 +99,12 @@
   <form id="composer">
     <textarea id="prompt" rows="3" placeholder="e.g. book ltt to sc 21oct 3ac 12219 rahul/31/m/lb/veg on irctc, username … password …, wait on payment page"></textarea>
     <div class="row-end">
-      <span class="hint">Ctrl+Enter to run</span>
+      <label class="hint planner">Planner
+        <select id="planner" aria-label="Model that plans the steps">
+          <option value="deepseek">DeepSeek</option>
+          <option value="cerebras">Cerebras Qwen</option>
+        </select>
+      </label>
       <div>
         <button id="stop" class="btn danger" type="button" hidden>Stop</button>
         <button id="run" class="btn primary" type="submit">Run task</button>

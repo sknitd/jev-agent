@@ -147,7 +147,7 @@ function render(ev) {
           h("button", { class: "btn primary", type: "button", text: "Continue", onclick: done }),
           h("button", { class: "btn danger", type: "button", text: "Stop task", onclick: () => port.postMessage({ type: "stop" }) })));
       askEls.set(ev.id, card);
-      stepEl?.append(card);
+      (stepEl || log).append(card); // questions asked before the first step go straight into the log
       break;
     }
 
@@ -218,11 +218,15 @@ async function start() {
 }
 
 async function checkKeys() {
-  const { typesafeKey, deepseekKey } = await chrome.storage.local.get(["typesafeKey", "deepseekKey"]);
-  const missing = !typesafeKey || !deepseekKey;
+  const s = await chrome.storage.local.get(["typesafeKey", "deepseekKey", "cerebrasKey", "planner"]);
+  const planner = s.planner || "deepseek";
+  $("planner").value = planner;
+  const missing = !s.typesafeKey || !(planner === "cerebras" ? s.cerebrasKey : s.deepseekKey);
   $("setup").hidden = !missing;
   $("run").disabled = missing;
 }
+
+$("planner").addEventListener("change", (e) => chrome.storage.local.set({ planner: e.target.value }));
 
 $("composer").addEventListener("submit", (e) => { e.preventDefault(); start(); });
 promptEl.addEventListener("keydown", (e) => {
