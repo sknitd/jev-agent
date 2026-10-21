@@ -1,6 +1,6 @@
 import { getSettings } from "./lib/settings.js";
 import { systemOne, noul, choice, box, newRef, imageAsset, answerOf } from "./lib/typesafe.js";
-import { chat, parseJSON } from "./lib/deepseek.js";
+import { chat, parseJSON, planner } from "./lib/deepseek.js";
 import { prepareScreenshot } from "./lib/image.js";
 import { redactGoal, fillSecrets } from "./lib/secrets.js";
 
@@ -80,14 +80,20 @@ function checkAbort(signal) {
 
 // ---- guards -------------------------------------------------------------------
 const CAPTCHA_RE = /captcha|otp\b|one[- ]time password|verification code/i;
-const PAY_BUTTON_RE = /\b(pay\s*(?:&|and)\s*book|pay\s*now|make\s*payment|proceed\s*to\s*pay|confirm\s*(?:&|and)\s*pay|pay\s*(?:₹|rs\.?|inr))/i;
-const PAY_URL_RE = /\/payment\/|bkgPaymentOptions|paymentredirect|razorpay|payu\.in|billdesk|ccavenue|juspay|securepay|\/checkout\/pay|:\/\/(payments?|pay|checkout)\.[a-z0-9-]+\.[a-z]/i;
+// Buttons that actually take money. "Proceed to Pay" is not one: on Paytm/others it only leads to the payment page.
+const PAY_BUTTON_RE = /\b(pay\s*(?:&|and)\s*book|pay\s*now|make\s*payment|confirm\s*(?:&|and)\s*pay|pay\s*(?:₹|rs\.?|inr)\s*[\d,])/i;
+const PAY_URL_RE = /\/payment\/|bkgPaymentOptions|paymentredirect|razorpay|payu\.in|billdesk|ccavenue|juspay|securepay|securegw|\/theia\/|\/checkout\/pay|:\/\/(payments?|pay|checkout)\.[a-z0-9-]+\.[a-z]/i;
+const PAY_METHODS = [/\bupi\b/i, /credit\s*(?:\/\s*debit)?\s*card|debit\s*card/i, /net\s*-?\s*banking/i, /\bwallets?\b/i, /pay\s*later/i, /\bemi\b/i];
 
-/** @returns {string|null} why this looks like a payment page */
+/** @returns {string|null} why this looks like a payment page: a gateway URL, or payment methods plus a pay control in view */
 function paymentPage(page) {
   if (PAY_URL_RE.test(page.url || "")) return "payment URL";
-  const btn = page.elements?.find((e) => PAY_BUTTON_RE.test(e.desc));
-  return btn ? `found ${btn.desc}` : null;
+  const inView = (page.elements || []).filter((e) => !/\[off-screen/.test(e.desc));
+  const text = page.text || "";
+  const methods = PAY_METHODS.filter((re) => re.test(text)).length;
+  const payControl = inView.find((e) => PAY_BUTTON_RE.test(e.desc) || /card number|cvv|upi id|vpa/i.test(e.desc));
+  if (methods >= 2 && payControl) return `payment options with ${payControl.desc}`;
+  return null;
 }
 
 const IRCTC_HOME = "https://www.irctc.co.in/nget/train-search";
@@ -149,9 +155,102 @@ function unaskedExtra(label, goal) {
   if (/gst number|gstin|company name|registration no/.test(l) && !/\bgst/.test(g)) return "the goal says nothing about GST; never tick or untick the GST option";
   if (/lock now|lock this price|lock price/.test(l) && !/\block/.test(g)) return "LOCK NOW is a paid price lock, not part of booking";
   const noAddons = /no[\s-]*add[\s-]*ons?|without add[\s-]*ons?|no extras/.test(g);
-  if (noAddons && (/yes,? secure my trip|price drop protection|zero cancellation|flexifly|travel insurance\b.*add|\badd\b"?$/.test(l) || /^(button|clickable box) "add"/.test(l)))
+  const declining = /don.?t want|\bno,? i |without|skip|not interested|no thanks/.test(l);
+  if (noAddons && !declining && (/yes,? secure my trip|price drop protection|zero cancellation|free cancellation|flexifly|travel insurance|trip secure|\badd\b"?$/.test(l) || /^(button|clickable box) "add"/.test(l)))
     return "the goal says no add-ons";
   return null;
+}
+
+/** What a flight booking will need that the request didn't give. */
+function travellerGaps(brief) {
+  if (!brief?.flight || !Array.isArray(brief.travellers)) return [];
+  const out = [];
+  for (const t of brief.travellers) {
+    const who = `${t.first || "traveller"} ${t.last || ""}`.trim();
+    const need = [];
+    if (!t.last) need.push("last name");
+    if (!/^[mf]/i.test(t.gender || "")) need.push("gender");
+    if (!/\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4}/.test(t.dob || "")) need.push("date of birth");
+    if (need.length) out.push(`${need.join(", ")} for ${who}`);
+  }
+  return out;
+}
+
+/** Spreads the user's answer ("Priya Sharma f 05/03/1995; ...") over the travellers, in order. */
+function applyTravellerReply(brief, reply) {
+  const parts = String(reply || "").split(/[;\n]+/).map((x) => x.trim()).filter(Boolean);
+  const dates = String(reply).match(/\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4}/g) || [];
+  brief.travellers.forEach((t, i) => {
+    const seg = parts.length === brief.travellers.length ? parts[i] : (parts.find((p) => t.first && p.toLowerCase().includes(t.first.toLowerCase())) || "");
+    const d = seg.match(/\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4}/)?.[0] || (parts.length <= 1 ? dates[i] : null);
+    if (d && !/\d/.test(t.dob || "")) t.dob = d;
+    const g = seg.match(/\b(male|female|m|f)\b/i)?.[1] || (parts.length <= 1 && brief.travellers.length === 1 ? String(reply).match(/\b(male|female|m|f)\b/i)?.[1] : null);
+    if (g && !/^[mf]/i.test(t.gender || "")) t.gender = g[0].toLowerCase();
+    if (!t.last && t.first && seg) {
+      const words = seg.replace(/\d[\d\/.\-]*/g, "").split(/[\s,]+/).filter((w) => w && !/^(m|f|male|female|mr|ms|mrs)$/i.test(w));
+      const i0 = words.findIndex((w) => w.toLowerCase() === t.first.toLowerCase());
+      if (i0 >= 0 && words[i0 + 1]) t.last = words[i0 + 1];
+    }
+  });
+}
+
+/** MakeMyTrip traveller form: rows, names (real typing), gender, DOB, country code, insurance, billing, CONTINUE. */
+async function mmtReview(tabId, brief, cfg, signal) {
+  const page = (msg) => chrome.tabs.sendMessage(tabId, msg).catch((e) => ({ ok: false, detail: e.message }));
+  const params = {
+    travellers: brief.travellers.map((t) => ({ first: t.first, last: t.last, gender: t.gender, dob: t.dob })),
+    mobile: brief.contact?.mobile, email: brief.contact?.email, countryCode: brief.contact?.country_code || "91",
+    insurance: !!brief.wants?.insurance, wheelchair: !!brief.wants?.wheelchair
+  };
+  let prep;
+  for (let i = 0; i < 3; i++) {
+    prep = await page({ cmd: "mmtPrepare", params });
+    if (!prep?.retry) break;
+    await settle(tabId, signal);
+    await sleep(1500);
+  }
+  if (!prep?.ok) return { ok: false, detail: prep?.detail || "the traveller script couldn't run" };
+  const parts = [...(prep.done || [])];
+  if (prep.text.length) {
+    const r = (cfg.trustedInput ? await fillReal(tabId, prep.text).catch(() => null) : null) || await page({ cmd: "fill", fields: prep.text });
+    parts.push(r.detail);
+  }
+  if (prep.other.length) parts.push((await page({ cmd: "fill", fields: prep.other })).detail);
+  await settle(tabId, signal);
+  if (prep.missing?.length) return { ok: false, detail: parts.join(". "), missing: prep.missing };
+  if (prep.continueId) {
+    await execute(tabId, { action: "click" }, { id: prep.continueId, label: 'button "CONTINUE"' }, cfg);
+    await settle(tabId, signal);
+    await sleep(1200);
+    const after = await page({ cmd: "snapshot" });
+    if (after?.errors?.length) return { ok: false, detail: `${parts.join(". ")}. CONTINUE showed errors`, errors: after.errors.map((e) => e.text) };
+    parts.push("pressed CONTINUE");
+  }
+  return { ok: true, detail: parts.join(". ") };
+}
+
+/** Clicks through Seats / Meals / Cabs / Add-ons without adding anything, until the payment page. */
+async function mmtAddons(tabId, cfg, signal) {
+  const clicked = [];
+  let last = "", same = 0;
+  for (let i = 0; i < 14; i++) {
+    checkAbort(signal);
+    const snap = await chrome.tabs.sendMessage(tabId, { cmd: "snapshot" }).catch(() => null);
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (tab && PAY_URL_RE.test(tab.url || "")) return { payment: true, clicked };
+    if (snap && paymentPage({ ...snap, url: tab?.url || snap.url })) return { payment: true, clicked };
+    const next = await chrome.tabs.sendMessage(tabId, { cmd: "mmtNextAddon" }).catch(() => null);
+    if (!next || PAY_BUTTON_RE.test(next.label)) break;
+    same = next.label === last ? same + 1 : 0;
+    if (same >= 3) break;
+    last = next.label;
+    await execute(tabId, { action: "click" }, { id: next.id, label: `button "${next.label}"` }, cfg);
+    clicked.push(next.label);
+    await settle(tabId, signal);
+    await sleep(700);
+  }
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  return { payment: !!tab && PAY_URL_RE.test(tab.url || ""), clicked };
 }
 
 /** MakeMyTrip's results page has a stable URL, so the whole search form can be skipped. */
@@ -198,6 +297,7 @@ const DOMAIN_NOTES = `Indian Railways / IRCTC shorthand:
 - A date without a year means the next such date from today.
 Traveller shorthand (flights, buses): "ms Priya Sharma, f, 05.03.1995" = title Ms, name Priya Sharma, female, date of birth 5 March 1995. A date written next to a traveller's name is that traveller's date of birth (DD.MM.YYYY, DD/MM/YYYY or DD-MM-YYYY, day first); the journey date is the one after "to"/"on" or with a month name like 24nov.
 Flights: IXR Ranchi, BLR Bengaluru, DEL Delhi, BOM Mumbai, MAA Chennai, CCU Kolkata, HYD Hyderabad, PNQ Pune, GOI/GOX Goa, AMD Ahmedabad, PAT Patna, JAI Jaipur, LKO Lucknow, COK Kochi. "fli8"/"flt" = flight, "mmt" = MakeMyTrip (https://www.makemytrip.com/flights/).
+Paytm flights ("paytm fli8"): https://tickets.paytm.com/flights. On the review page pick "I don't want Free Cancellation" when there are no add-ons, add the traveller with "+ Add New Traveller", fill the form, then "Proceed To Pay" leads to the payment page (that is where to stop).
 MakeMyTrip:
 - Close the login popup (its close X, or Escape). Keep One Way selected.
 - From/To boxes are read-only: click the From box, then type the city into the input that appears (placeholder "From"), then click the suggestion option with the airport code. Same for To.
@@ -231,6 +331,7 @@ const BRIEF_SYSTEM = `You turn a short browser-task request into a clear plan fo
 ${DOMAIN_NOTES}
 
 Reply with one JSON object: {"task": "the request restated in full words, with every value spelled out", "site": "start URL", "values": {"field": "value"}, "steps": ["short step", ...], "stop_at": "when the agent must stop and hand over", "irctc": {"from": "LTT", "to": "SC", "date": "DD/MM/YYYY", "class": "3A", "quota": "GN", "train": "12219"}}.
+For any booking also include "travellers": [{"title": "Ms", "first": "Priya", "last": "Sharma", "gender": "f", "dob": "DD/MM/YYYY", "age": 30}] (one per person, in order; empty string for anything not given) and "contact": {"mobile": "", "email": "", "country_code": "91"}, plus "wants": {"insurance": false, "wheelchair": false, "addons": false} (true only if the request asks for it).
 Include "irctc" only for an IRCTC train booking or search; use station codes and class codes, and leave out what the request doesn't say.
 For a one-way flight search also include "flight": {"from": "IXR", "to": "BLR", "date": "DD/MM/YYYY", "adults": 2, "children": 0, "infants": 0, "cabin": "economy"}, counting travellers from the names given (each named person is an adult unless an age says otherwise).
 Keep {{PLACEHOLDERS}} exactly as written; they stand for secrets the agent fills in later. Never invent values the request doesn't give.`;
@@ -272,7 +373,7 @@ async function agentLoop(goal, secrets, tabs, signal) {
   const banned = new Map(); // element id -> step it was banned at
   const cfg = await getSettings();
   if (!cfg.typesafeKey) throw new Error("Add your TypeSafe API key in Settings.");
-  if (!cfg.deepseekKey) throw new Error("Add your DeepSeek API key in Settings.");
+  if (!planner(cfg).key) throw new Error(`Add your ${planner(cfg).name} API key in Settings.`);
 
   const brief = await makeBrief(cfg, goal, signal).catch((e) => {
     if (signal.aborted) throw e;
@@ -280,11 +381,21 @@ async function agentLoop(goal, secrets, tabs, signal) {
   });
   if (brief) emit({ type: "brief", brief });
 
+  // Flights need each traveller's gender and date of birth; ask for whatever is missing now, not halfway through.
+  const gaps = travellerGaps(brief);
+  if (gaps.length) {
+    const reply = await askUser({ step: 0, question: `Before I start: ${gaps.join("; ")}. Type them below, e.g. "Priya Sharma f 05/03/1995" (one traveller per line or separated by ;), or press Continue to skip.` });
+    if (reply == null) return { status: "stopped", answer: "Stopped before starting." };
+    applyTravellerReply(brief, reply);
+  }
+
   const history = [];
   let doneChallenged = false;
   let fastPathTried = false;
   let emptyPages = 0;
   let irctcRestarts = 0;
+  let queue = [], lastObs = null;    // actions the planner sent together, and the page they were planned on
+  let mmtReviewTries = 0, mmtAddonTries = 0;
   let scrollBlockedUntil = 0;
   let mmtTried = false;
 
@@ -300,12 +411,21 @@ async function agentLoop(goal, secrets, tabs, signal) {
       await settle(tabId, signal);
     }
 
-    const obs = await observe(tabId, cfg);
-    emit({
+    // Queued actions run straight away while the page is still the one they were planned on.
+    let queued = null;
+    if (queue.length && lastObs) {
+      const now = await chrome.tabs.get(tabId).catch(() => null);
+      if (now?.url === lastObs.page.url) queued = queue.shift();
+      else queue = [];
+    }
+    const obs = queued ? lastObs : await observe(tabId, cfg, { shot: planner(cfg).vision });
+    if (!queued) emit({
       type: "observe", step, url: obs.page.url, title: obs.page.title,
       elements: obs.page.elements.length, restricted: !!obs.page.restricted, thumb: obs.shot?.dataUrl || null
     });
     checkAbort(signal);
+    let plan = queued;
+    if (!queued) {
 
     // IRCTC's "Sorry!!! Please Try again!!" page means the session is dead: start over from the search page.
     if (/irctc\.co\.in/i.test(obs.page.url || "") && IRCTC_SORRY.test(obs.page.text || "")) {
@@ -386,7 +506,33 @@ async function agentLoop(goal, secrets, tabs, signal) {
     }
     for (const [id, at] of banned) if (step - at > 8) banned.delete(id);
 
-    let plan = await planNext(cfg, goal, brief, obs, history, signal);
+    // MakeMyTrip: traveller form and the Seats/Meals/Cabs/Add-ons steps are done by fixed scripts.
+    if (/makemytrip\.com\/flight\/reviewDetails/i.test(obs.page.url || "")) {
+      const descs = obs.page.elements.map((e) => e.desc).join("\n");
+      const onForm = /ADD NEW ADULT|First & Middle Name|NETWORK PROBLEM/i.test(descs + (obs.page.text || ""));
+      const onAddons = /Skip to (seats|meals|cabs|add-?ons|payment)|No,? Let Me Choose|PROCEED TO PAY/i.test(descs);
+      if (brief?.travellers?.length && onForm && !onAddons && mmtReviewTries < 2) {
+        mmtReviewTries++;
+        emit({ type: "plan", step, plan: { action: "mmt_travellers", thought: "Filling the MakeMyTrip traveller form directly.", target: brief.travellers.map((t) => `${t.first} ${t.last || ""}`.trim()).join(", ") } });
+        const r = await mmtReview(tabId, brief, cfg, signal);
+        emit({ type: "act", step, ok: r.ok, detail: r.detail });
+        history.push({ step, action: "fill traveller form", result: r.ok ? `ok: ${r.detail}` : `partly: ${r.detail}${r.errors?.length ? `. Form errors: ${r.errors.join("; ")}` : ""}${r.missing?.length ? `. Missing from the goal: ${r.missing.join(", ")}; ask_user for them` : ""}` });
+        if (!r.ok) continue;
+      }
+      if ((onAddons || mmtReviewTries) && mmtAddonTries < 2) {
+        mmtAddonTries++;
+        emit({ type: "plan", step, plan: { action: "mmt_skip_addons", thought: "Skipping seats, meals, cabs and add-ons.", target: "to the payment page" } });
+        const a = await mmtAddons(tabId, cfg, signal);
+        emit({ type: "act", step, ok: a.payment, detail: a.clicked.length ? `clicked ${a.clicked.join(" → ")}` : "nothing to skip" });
+        history.push({ step, action: "skip add-ons", result: a.payment ? "reached the payment page" : `clicked ${a.clicked.join(" → ") || "nothing"}; not at payment yet` });
+        if (a.payment) return { status: "handoff", answer: "Reached the MakeMyTrip payment page with the travellers filled in and no add-ons. Complete the payment yourself in this tab." };
+        continue;
+      }
+    }
+
+    plan = await planNext(cfg, goal, brief, obs, history, signal);
+    if (plan.queue?.length) { queue = plan.queue; lastObs = obs; }
+    } // end of the not-queued branch
 
     // Captchas and OTPs are for the person, never the agent.
     if (plan.action === "type" && CAPTCHA_RE.test(plan.target || "")) {
@@ -522,6 +668,7 @@ async function agentLoop(goal, secrets, tabs, signal) {
       if (r.retried) result.detail += ` (retried ${r.retried}x after IRCTC busy errors${r.stillBusy ? ", still busy" : ""})`;
     }
     emit({ type: "act", step, ok: result.ok, detail: redact(result.detail, secrets) });
+    if (!result.ok) queue = [];
     // IRCTC: the class you asked for isn't bookable -> check the others and let the user choose.
     if (plan.action === "click" && /irctc\.co\.in/.test(obs.page.url || "") && /\((SL|3A|2A|1A|3E|CC|EC|2S)\)/.test(target?.label || "") && target?.id) {
       await settle(tabId, signal);
@@ -554,33 +701,42 @@ async function ensureContent(tabId) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
 }
 
-async function observe(tabId, cfg) {
+/**
+ * Reads the page. The screenshot (with element ids drawn on it) is only taken when something needs it:
+ * Jev grounding, the done-check, or a planner that looks at images. Most steps skip it.
+ */
+async function observe(tabId, cfg, { shot: wantShot = false } = {}) {
   const tab = await chrome.tabs.get(tabId);
   if (!tab.active) await chrome.tabs.update(tabId, { active: true });
 
   let page;
-  let marked = false;
   try {
     await ensureContent(tabId);
     page = await chrome.tabs.sendMessage(tabId, { cmd: "snapshot" });
-    if (cfg.setOfMark && page.elements.length) {
-      await chrome.tabs.sendMessage(tabId, { cmd: "marks", show: true });
-      marked = true;
-    }
   } catch {
     page = { url: tab.url || "", title: tab.title || "", elements: [], text: "", viewport: null, scroll: null, restricted: true };
   }
 
-  let shot = null;
-  try {
-    const raw = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    shot = await prepareScreenshot(raw);
-  } catch {
-    shot = null; // chrome:// pages, the Web Store, PDFs etc.
-  } finally {
-    if (marked) await chrome.tabs.sendMessage(tabId, { cmd: "marks", show: false }).catch(() => {});
-  }
-  return { page, shot, marked };
+  const obs = { page, shot: null, marked: false };
+  obs.capture = async () => {
+    if (obs.shot || obs.tried) return obs.shot;
+    obs.tried = true;
+    try {
+      if (cfg.setOfMark && page.elements.length && !page.restricted) {
+        await chrome.tabs.sendMessage(tabId, { cmd: "marks", show: true });
+        obs.marked = true;
+      }
+      const raw = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+      obs.shot = await prepareScreenshot(raw);
+    } catch {
+      obs.shot = null; // chrome:// pages, the Web Store, PDFs etc.
+    } finally {
+      if (obs.marked) await chrome.tabs.sendMessage(tabId, { cmd: "marks", show: false }).catch(() => {});
+    }
+    return obs.shot;
+  };
+  if (wantShot) await obs.capture();
+  return obs;
 }
 
 // ---- plan (DeepSeek) ----------------------------------------------------------
@@ -607,7 +763,7 @@ Actions:
 - fail: the goal can't be reached. Explain why in answer.
 
 Rules:
-- One action per reply.
+- Usually one action per reply. When the next few actions don't depend on the page changing in between (fill a form, tick a box, then press Continue), send up to 4 in one reply as {"thought": "...", "actions": [{"action": "fill", ...}, {"action": "click", "element_hint": "e40", "target": "..."}]}. Every action in the list needs its element_hint. Put anything that navigates or opens a popup last.
 - element_hint is the [id] from the element list. Always include it when the element is in the list; it makes the agent much faster.
 - If the element you need isn't in the list, scroll or navigate first.
 - Don't repeat an action that already failed the same way; try another route.
@@ -661,7 +817,7 @@ Choose the next action. Reply with JSON.`;
 
 async function planNext(cfg, goal, brief, obs, history, signal) {
   const text = plannerUserText(goal, brief, obs, history);
-  const userContent = cfg.deepseekVision && obs.shot
+  const userContent = planner(cfg).vision && obs.shot
     ? [{ type: "text", text }, { type: "image_url", image_url: { url: obs.shot.dataUrl } }]
     : text;
   const messages = [{ role: "system", content: PLANNER_SYSTEM }, { role: "user", content: userContent }];
@@ -669,7 +825,14 @@ async function planNext(cfg, goal, brief, obs, history, signal) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const r = await chat(cfg, messages, { signal });
     try {
-      const plan = parseJSON(r.content);
+      const raw = parseJSON(r.content);
+      // Several actions in one reply: run the first now, queue the rest.
+      const list = Array.isArray(raw.actions) && raw.actions.length ? raw.actions.slice(0, 4) : null;
+      const plan = list ? { thought: raw.thought, ...list[0] } : raw;
+      if (list) {
+        plan.queue = list.slice(1).filter((a) => a && ACTIONS.has(String(a.action || "").toLowerCase()) && a.element_hint)
+          .map((a) => ({ ...a, action: String(a.action).toLowerCase(), thought: "(queued from the same plan)" }));
+      }
       plan.action = String(plan.action || "").toLowerCase().trim();
       if (!ACTIONS.has(plan.action)) throw new Error(`unknown action "${plan.action}"`);
       if (NEEDS_TARGET.has(plan.action) && !plan.target && !plan.element_hint) throw new Error("target is missing");
@@ -717,6 +880,7 @@ function actionText(plan) {
 }
 
 async function ground(cfg, goal, plan, obs, tabId, signal) {
+  await obs.capture?.();
   const { page, shot, marked } = obs;
   const els = page.elements.slice(0, 150);
   const ids = new Set(els.map((e) => e.id));
@@ -833,6 +997,7 @@ async function ground(cfg, goal, plan, obs, tabId, signal) {
 
 // ---- verify (Jev) -------------------------------------------------------------
 async function verifyDone(cfg, goal, plan, obs, signal) {
+  await obs.capture?.();
   const ref = obs.shot ? newRef("screen") : null;
   const res = await systemOne(cfg, {
     model: cfg.jevModel,

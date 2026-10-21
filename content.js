@@ -31,13 +31,22 @@
     return el && el.isConnected ? el : null;
   }
 
+  /** Nearest small ancestor that has text, for a radio/checkbox drawn without a <label> (MakeMyTrip insurance). */
+  function textWrapper(el) {
+    for (let p = el.parentElement, d = 0; p && p !== document.body && d < 4; p = p.parentElement, d++) {
+      const t = clean(p.innerText, 200);
+      if (t && t.length < 120 && p.querySelectorAll("input[type=radio], input[type=checkbox]").length === 1) return p;
+    }
+    return null;
+  }
+
   /** A styled radio/checkbox is often invisible (opacity 0) behind its label; the label is what to click. */
   function hitTarget(el) {
     if (el.tagName === "INPUT" && (el.type === "radio" || el.type === "checkbox")) {
       const cs = getComputedStyle(el);
       const r = el.getBoundingClientRect();
       const hidden = parseFloat(cs.opacity) === 0 || r.width < 3 || r.height < 3 || cs.visibility === "hidden";
-      const lab = el.labels?.[0] || el.closest("label");
+      const lab = el.labels?.[0] || el.closest("label") || textWrapper(el);
       if (hidden && lab && lab.getBoundingClientRect().width > 3) return lab;
     }
     // react-select and co.: the typing box is ~2px wide; the dropdown around it is what people click.
@@ -92,6 +101,10 @@
       if (clean(t)) return clean(t);
     }
     if (el.labels?.[0]) return clean(el.labels[0].innerText);
+    if (el.tagName === "INPUT" && /^(radio|checkbox)$/.test(el.type)) {
+      const w = el.closest("label") || textWrapper(el);
+      if (w && clean(w.innerText)) return clean(w.innerText);
+    }
     const text = clean(el.innerText);
     if (text) return text;
     if (el.tagName === "INPUT" && ["button", "submit", "reset"].includes(el.type) && el.value) return clean(el.value);
@@ -830,6 +843,135 @@
     return { train, classes: out };
   }
 
+  // ---- MakeMyTrip review page (fast path) -------------------------------------
+  const FIRST_SEL = 'input[placeholder="First & Middle Name"]';
+  const lc = (x) => clean(x).toLowerCase();
+
+  /** One entry per traveller row: the row's tick box (saved or new adult) and its form. */
+  function mmtRows() {
+    return [...document.querySelectorAll(FIRST_SEL)].map((first) => {
+      let wrap = null;
+      for (let p = first.parentElement; p && p !== document.body; p = p.parentElement) {
+        if (p.querySelectorAll(FIRST_SEL).length > 1) break;
+        if (p.querySelector("label.checkboxContainer input[type=checkbox], label input[type=checkbox]")) wrap = p;
+      }
+      wrap ||= first.closest("div");
+      const cb = [...wrap.querySelectorAll("input[type=checkbox]")].find((c) => !/^trvl_chkbox|^cb_/.test(c.id || ""));
+      const label = cb && (cb.closest("label") || cb.parentElement);
+      return { wrap, first, cb, label, name: lc(label?.innerText || "") };
+    });
+  }
+
+  /** Smallest visible-ish element whose own text matches re. */
+  function byText(re, sel = "label, p, span, div, a, button, b") {
+    let best = null;
+    for (const x of document.querySelectorAll(sel)) {
+      const t = clean(x.innerText, 200);
+      if (!t || !re.test(t) || x.getBoundingClientRect().width < 2) continue;
+      if (!best || t.length < clean(best.innerText, 200).length) best = x;
+    }
+    return best;
+  }
+
+  /**
+   * Gets the traveller form ready: a ticked row per traveller (reusing saved ones, adding new adults),
+   * unwanted rows unticked. Returns what still needs real typing (text) and what the page script can set (other).
+   */
+  async function mmtPrepare(p) {
+    if (/NETWORK PROBLEM/i.test(document.body.innerText)) {
+      const r = byText(/^REFRESH$/i);
+      if (r) { clickEl(r); return { ok: false, retry: true, detail: "MakeMyTrip showed NETWORK PROBLEM; pressed REFRESH" }; }
+    }
+    const addBtn = () => [...document.querySelectorAll("button, a")].find((b) => /ADD NEW ADULT/i.test(b.innerText || ""));
+    if (!addBtn() && !document.querySelector(FIRST_SEL)) return { ok: false, detail: "not on the traveller form yet" };
+    const done = [];
+    const used = new Set(), forms = [];
+    for (const t of p.travellers) {
+      const firstName = lc(t.first).split(" ")[0];
+      let row = mmtRows().find((r) => !used.has(r.first) && firstName && (lc(r.first.value).startsWith(firstName) || r.name.startsWith(firstName)));
+      if (!row) row = mmtRows().find((r) => !used.has(r.first) && r.cb?.checked && !r.first.value);
+      if (!row) {
+        const n = document.querySelectorAll(FIRST_SEL).length;
+        const b = addBtn();
+        if (!b) return { ok: false, detail: `no "+ ADD NEW ADULT" button for ${t.first}` };
+        clickEl(b);
+        await waitFor(() => document.querySelectorAll(FIRST_SEL).length > n, 3000);
+        row = mmtRows().find((r) => !used.has(r.first) && !r.first.value);
+        done.push(`added an adult for ${t.first}`);
+      }
+      if (!row) return { ok: false, detail: `couldn't open a form for ${t.first}` };
+      if (row.cb && !row.cb.checked) { clickEl(row.label); await sleep(300); done.push(`ticked saved ${row.name || t.first}`); }
+      used.add(row.first);
+      forms.push({ t, row });
+    }
+    for (const r of mmtRows()) if (!used.has(r.first) && r.cb?.checked) { clickEl(r.label); await sleep(200); done.push(`unticked ${r.name}`); }
+    await sleep(200);
+
+    const text = [], other = [], missing = [];
+    for (const { t, row } of forms) {
+      const w = row.wrap;
+      if (lc(row.first.value) !== lc(t.first)) text.push({ id: idFor(row.first), value: t.first });
+      const last = w.querySelector('input[placeholder="Last Name"]');
+      if (last && t.last && lc(last.value) !== lc(t.last)) text.push({ id: idFor(last), value: t.last });
+      if (last && !t.last && !last.value) missing.push(`last name for ${t.first}`);
+      const g = /^f/i.test(t.gender || "") ? "FEMALE" : /^m/i.test(t.gender || "") ? "MALE" : null;
+      const gr = g && w.querySelector(`input[type=radio][value=${g}]`);
+      if (gr && !gr.checked) other.push({ id: idFor(gr), value: "check" });
+      if (!g && ![...w.querySelectorAll("input[type=radio]")].some((r) => r.checked)) missing.push(`gender for ${t.first}`);
+      const sels = [...w.querySelectorAll("input[aria-autocomplete=list]")];
+      const ctl = (i) => clean(i.closest("[class*='__control'], [class*='-control']")?.innerText);
+      const cc = sels.find((i) => /country|\(\d+\)/i.test(ctl(i)));
+      const dob = sels.filter((i) => i !== cc && !/frequent/i.test(ctl(i)));
+      if (dob.length >= 3) {
+        const [d, m, y] = String(t.dob || "").split(/[\/.\-\s]+/);
+        if (d && m && y) other.push({ id: idFor(dob[0]), value: String(Number(d)) }, { id: idFor(dob[1]), value: m }, { id: idFor(dob[2]), value: y.length === 2 ? `19${y}` : y });
+        else if (dob.some((i) => !/\d/.test(ctl(i)))) missing.push(`date of birth for ${t.first}`);
+      }
+      if (cc && !/\(91\)/.test(ctl(cc))) other.push({ id: idFor(cc), value: String(p.countryCode || "91") });
+      const wheel = w.querySelector("input[id^=trvl_chkbox]");
+      if (wheel?.checked && !p.wheelchair) other.push({ id: idFor(wheel), value: "uncheck" });
+    }
+    // Booking contact.
+    const cm = [...document.querySelectorAll('input[placeholder="Mobile No"]')].find(shown);
+    const ce = [...document.querySelectorAll('input[placeholder="Email"]')].find(shown);
+    if (cm && p.mobile && cm.value !== p.mobile) text.push({ id: idFor(cm), value: p.mobile });
+    if (ce && p.email && ce.value !== p.email) text.push({ id: idFor(ce), value: p.email });
+    if (cm && !p.mobile && !cm.value) missing.push("mobile number");
+    if (ce && !p.email && !ce.value) missing.push("email");
+    // Trip insurance: "No" unless asked.
+    if (!p.insurance) {
+      const no = byText(/^No,?\s*I will book without/i);
+      const radio = no && (no.closest("label")?.querySelector("input[type=radio]") || no.querySelector?.("input[type=radio]"));
+      if (radio && !radio.checked) other.push({ id: idFor(radio), value: "check" });
+      else if (no && !radio) other.push({ id: idFor(no), value: "check" });
+    }
+    // Billing confirmation tick box (a styled <p> next to a hidden checkbox).
+    const bp = byText(/^Confirm and save billing details/i, "p, span, label");
+    const bcb = bp?.parentElement?.querySelector("input[type=checkbox]") || bp?.parentElement?.parentElement?.querySelector("input[type=checkbox]");
+    if (bp && bcb && !bcb.checked) other.push({ id: idFor(bp), value: "check" });
+    const cont = [...document.querySelectorAll("button, a")].find((b) => /^CONTINUE$/i.test(clean(b.innerText)));
+    return { ok: true, text, other, missing, done, continueId: cont ? idFor(cont) : null };
+  }
+
+  /** On MakeMyTrip's Seats / Meals / Cabs / Add-ons steps: the next button that moves on without adding anything. */
+  function mmtNextAddon() {
+    const order = [
+      /^(GOT IT|Got it!?|OK|Okay)$/i, /^No,?\s*Let Me Choose$/i, /^(Skip|No,? thanks|Not now|I'?ll skip|Skip for now)$/i,
+      /^Skip to (seats|meals|cabs|add-?ons|payment)/i,
+      /^Confirm\s*(?:&|and)\s*continue$/i, /^PROCEED TO PAY$/i, /^CONTINUE$/i
+    ];
+    const cands = [...document.querySelectorAll("button, a, [role=button], span, p, div")]
+      .filter((x) => shown(x) && ((x.children.length <= 2 && getComputedStyle(x).cursor === "pointer") || /^(BUTTON|A)$/.test(x.tagName)));
+    for (const re of order) {
+      const hit = cands.filter((x) => re.test(clean(x.innerText, 60)));
+      if (hit.length) {
+        const x = hit.sort((a, b) => clean(a.innerText).length - clean(b.innerText).length)[0];
+        return { id: idFor(x), label: clean(x.innerText, 60) };
+      }
+    }
+    return null;
+  }
+
   async function irctcSearch(p) {
     const done = [];
     try {
@@ -1049,6 +1191,8 @@
           hideMarks(); send({ ok: true }); return;
         case "point": send(pointInfo(msg.x, msg.y)); return;
         case "busy": send(busy()); return;
+        case "mmtPrepare": mmtPrepare(msg.params).then(send, (e) => send({ ok: false, detail: e.message })); return true;
+        case "mmtNextAddon": send(mmtNextAddon()); return;
         case "toasts": send(errorToasts()); return;
         case "dismissToasts": send(dismissToasts()); return;
         case "irctcClasses": irctcClasses(msg.id, !!msg.check).then(send, () => send(null)); return true;

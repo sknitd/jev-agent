@@ -1,6 +1,6 @@
 import { DEFAULTS, getSettings, saveSettings } from "./lib/settings.js";
 import { testTypeSafe } from "./lib/typesafe.js";
-import { testDeepSeek } from "./lib/deepseek.js";
+import { testDeepSeek, testCerebras } from "./lib/deepseek.js";
 
 const $ = (id) => document.getElementById(id);
 const KEYS = Object.keys(DEFAULTS);
@@ -28,7 +28,7 @@ function read() {
   }
   out.maxSteps = Math.max(1, Math.min(100, Math.round(out.maxSteps)));
   for (const k of ["choiceThreshold", "boxThreshold", "riskThreshold"]) out[k] = Math.max(0, Math.min(1, out[k]));
-  for (const k of ["typesafeBase", "deepseekBase", "jevModel", "boxModel", "deepseekModel"]) if (!out[k]) out[k] = DEFAULTS[k];
+  for (const k of ["typesafeBase", "deepseekBase", "jevModel", "boxModel", "deepseekModel", "cerebrasBase", "cerebrasModel"]) if (!out[k]) out[k] = DEFAULTS[k];
   return out;
 }
 
@@ -75,6 +75,7 @@ async function runTest(button, listId, fn, missingKey, label) {
 
 $("testTypeSafe").addEventListener("click", (e) => runTest(e.currentTarget, "tsResults", testTypeSafe, "typesafeKey", "TypeSafe"));
 $("testDeepSeek").addEventListener("click", (e) => runTest(e.currentTarget, "dsResults", testDeepSeek, "deepseekKey", "DeepSeek"));
+$("testCerebras").addEventListener("click", (e) => runTest(e.currentTarget, "cbResults", testCerebras, "cerebrasKey", "Cerebras"));
 
 document.querySelectorAll("[data-reveal]").forEach((b) => {
   b.addEventListener("click", () => {
@@ -94,7 +95,7 @@ $("form").addEventListener("submit", async (e) => {
 });
 
 $("reset").addEventListener("click", () => {
-  const keep = { typesafeKey: $("typesafeKey").value.trim(), deepseekKey: $("deepseekKey").value.trim() };
+  const keep = { typesafeKey: $("typesafeKey").value.trim(), deepseekKey: $("deepseekKey").value.trim(), cerebrasKey: $("cerebrasKey").value.trim() };
   fill({ ...DEFAULTS, ...keep });
   flash("Defaults restored. Save to keep them.");
 });
